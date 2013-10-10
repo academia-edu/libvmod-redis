@@ -1,0 +1,25 @@
+varnishtest "Test redis insertion and retrieval"
+
+server s1 {
+	rxreq
+	txresp
+} -start
+
+varnish v1 -vcl+backend {
+	import redis from "${vmod_topbuild}/src/.libs/libvmod_redis.so";
+
+	sub vcl_deliver {
+		redis.connect("127.0.0.1", 6379);
+		redis.command_void("SET foo %s" + req.http.payload);
+		set resp.http.redis = redis.command_string("GET foo");
+		redis.disconnect();
+	}
+} -start
+
+client c1 {
+	txreq -url "/" -hdr "payload: hello"
+	rxresp
+	expect resp.http.redis == "hello"
+}
+
+client c1 -run
