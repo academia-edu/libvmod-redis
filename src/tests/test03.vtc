@@ -1,4 +1,4 @@
-varnishtest "Test redis insertion and retrieval"
+varnishtest "Test redis connect and disconnect"
 
 server s1 {
 	rxreq
@@ -11,14 +11,15 @@ varnish v1 -vcl+backend {
 	sub vcl_deliver {
 		redis.connect("127.0.0.1", 6379);
 		redis.command_void("SET foo %s" + req.http.payload);
-		set resp.http.redis = redis.command_string("GET foo");
+		set resp.http.redis = redis.command_int("INCR foo");
+		redis.disconnect();
 	}
 } -start
 
 client c1 {
-	txreq -url "/" -hdr "payload: hello"
+	txreq -url "/" -hdr "payload: 1337"
 	rxresp
-	expect resp.http.redis == "hello"
+	expect resp.http.redis == "1338"
 }
 
 client c1 -run
