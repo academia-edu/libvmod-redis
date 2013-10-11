@@ -30,7 +30,7 @@ typedef struct {
 	GMainContext *io_context;
 	GMainLoop *io_loop;
 	uint64_t magic;
-#define REDIS_MAGIC 0x0be7c29131fbd7a4
+#define REDIS_MAGIC 0x0be7c29131fbd7a4LL
 } RedisState;
 
 typedef struct {
