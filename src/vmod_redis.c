@@ -30,7 +30,7 @@ typedef struct {
 	GMainContext *io_context;
 	GMainLoop *io_loop;
 	uint64_t magic;
-#define REDIS_MAGIC 0x0be7c29131fbd7a4LL
+#define REDIS_MAGIC 0x0be7c29131fbd7a4ULL
 } RedisState;
 
 typedef struct {
@@ -257,7 +257,7 @@ typedef struct {
 static void vmod_command_string_callback( redisAsyncContext *rac, redisReply *reply, VmodCommandStringCallbackArgs *args ) {
 	(void) rac;
 #ifndef NDEBUG
-	dbgprintf("vmod_command_string_callback: reply = %p\n", reply);
+	dbgprintf("vmod_command_string_callback: reply = %p\n", (void *) reply);
 	if( reply != NULL ) {
 		dbgprintf("vmod_command_string_callback: reply->type = %d, REDIS_REPLY_STRING = %d\n", reply->type, REDIS_REPLY_STRING);
 	}

@@ -8,8 +8,11 @@ server s1 {
 varnish v1 -vcl+backend {
 	import redis from "${vmod_topbuild}/src/.libs/libvmod_redis.so";
 
-	sub vcl_deliver {
+	sub vcl_init {
 		redis.connect("127.0.0.1", 6379);
+	}
+
+	sub vcl_deliver {
 		redis.command_void("SET foo %s" + req.http.payload);
 		set resp.http.redis = redis.command_string("GET foo");
 	}
