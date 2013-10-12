@@ -89,7 +89,11 @@ typedef struct {
 
 typedef struct {
 	RedisState *rs;
-	GMutex *done_lock;
+	struct {
+		GMutex *lock;
+		GCond *cond;
+		bool value;
+	} done;
 	RedisResponseClosure *closure;
 } RedisResponseState;
 
@@ -106,7 +110,10 @@ void redis_response_callback( redisAsyncContext *c, redisReply *reply, RedisResp
 		rrs->closure->func(c, reply, rrs->closure->data);
 	}
 
-	g_mutex_unlock(rrs->done_lock);
+	g_mutex_lock(rrs->done.lock);
+	rrs->done.value = true;
+	g_cond_broadcast(rrs->done.cond);
+	g_mutex_unlock(rrs->done.lock);
 }
 
 void redis_connect_callback( const redisAsyncContext *c, int status ) {
@@ -144,21 +151,34 @@ void redis_command( RedisState *rs, RedisResponseClosure *closure, const char *c
 	GMutex done_lock;
 	g_mutex_init(&done_lock);
 
+	GCond done_cond;
+	g_cond_init(&done_cond);
+
 	RedisResponseState rrs = {
 		.rs = rs,
-		.done_lock = &done_lock,
+		.done = {
+			.lock = &done_lock,
+			.cond = &done_cond,
+			.value = false
+		},
 		.closure = closure
 	};
 
 	g_mutex_lock(&done_lock);
-	g_rec_mutex_lock(&hiredis_lock);
-	redisvAsyncCommand(ctx, (redisCallbackFn *) redis_response_callback, &rrs, cmd, ap);
-	g_rec_mutex_unlock(&hiredis_lock);
-	dbgprintf("redis_command: waiting...\n");
-	g_mutex_lock(&done_lock);
-	dbgprintf("redis_command: done\n");
+
+	while( !rrs.done.value ) {
+		g_rec_mutex_lock(&hiredis_lock);
+		redisvAsyncCommand(ctx, (redisCallbackFn *) redis_response_callback, &rrs, cmd, ap);
+		g_rec_mutex_unlock(&hiredis_lock);
+
+		dbgprintf("redis_command: waiting...\n");
+		g_cond_wait(&done_cond, &done_lock);
+		dbgprintf("redis_command: done\n");
+	}
 
 	g_mutex_unlock(&done_lock);
+
+	g_cond_clear(&done_cond);
 	g_mutex_clear(&done_lock);
 }
 
