@@ -238,7 +238,7 @@ void vmod_disconnect( struct sess *sp, struct vmod_priv *global ) {
 	g_rec_mutex_unlock(&hiredis_lock);
 }
 
-void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *cmd, ...) {
+void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *cmd, ... ) {
 	(void) sp;
 	dbgprintf("vmod_command_void: cmd = '%s'\n", cmd);
 	RedisState *rs = redis_state(global);
