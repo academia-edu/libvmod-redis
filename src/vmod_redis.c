@@ -121,6 +121,12 @@ void redis_connect_callback( const redisAsyncContext *c, int status ) {
 	dbgprintf("redis_connect_callback: Connected!\n");
 }
 
+typedef struct {
+	GMutex lock;
+	GCond cond;
+	bool disconnected;
+} RedisDisconnectArgs;
+
 void redis_disconnect_callback( const redisAsyncContext *c, int status ) {
 	(void) status;
 
@@ -137,6 +143,15 @@ void redis_disconnect_callback( const redisAsyncContext *c, int status ) {
 	g_rw_lock_writer_lock(&rs->redis_lock);
 	rs->redis = NULL;
 	g_rw_lock_writer_unlock(&rs->redis_lock);
+
+	RedisDisconnectArgs *args = g_dataset_get_data(c, "redis-disconnect-args");
+	g_assert(args != NULL);
+	g_dataset_remove_data(c, "redis-disconnect-args");
+
+	g_mutex_lock(&args->lock);
+	args->disconnected = true;
+	g_cond_broadcast(&args->cond);
+	g_mutex_unlock(&args->lock);
 }
 
 void redis_command( RedisState *rs, RedisResponseClosure *closure, const char *cmd, va_list ap ) {
@@ -203,6 +218,7 @@ static bool contains_null_strings( const char *cmd, va_list ap ) {
 
 int vmod_redis_init( struct vmod_priv *global, const struct VCL_conf *conf ) {
 	(void) conf;
+	dbgprintf("vmod_redis_init\n");
 	global->priv = new_redis_state();
 	global->free = (vmod_priv_free_f *) free_redis_state;
 	return 0;
@@ -215,46 +231,35 @@ static RedisState *redis_state( struct vmod_priv *global ) {
 	return ret;
 }
 
-void vmod_connect( struct sess *sp, struct vmod_priv *global, const char *host, int port ) {
-	(void) sp;
-
-	g_return_if_fail(host != NULL);
-
-	dbgprintf("vmod_connect: host = '%s', port = %d\n", host, port);
-
-	RedisState *rs = redis_state(global);
-	g_rw_lock_writer_lock(&rs->redis_lock);
-
-	if( rs->redis != NULL ) {
-		g_rw_lock_writer_unlock(&rs->redis_lock);
-		return;
-	}
-
-	g_rec_mutex_lock(&hiredis_lock);
-	rs->redis = redisAsyncConnect(host, port);
-	redisAsyncSetConnectCallback(rs->redis, redis_connect_callback);
-	redisAsyncSetDisconnectCallback(rs->redis, redis_disconnect_callback);
-	g_rec_mutex_unlock(&hiredis_lock);
-
-	g_rw_lock_writer_unlock(&rs->redis_lock);
-
-	g_dataset_set_data(rs->redis, "redis-state", rs);
-
-	g_rec_mutex_lock(&hiredis_lock);
-	redisGlibAttach(rs->io_context, rs->redis);
-	g_rec_mutex_unlock(&hiredis_lock);
-}
-
 void vmod_disconnect( struct sess *sp, struct vmod_priv *global ) {
 	(void) sp;
 	dbgprintf("vmod_disconnect\n");
+
+	RedisDisconnectArgs args = {
+		.disconnected = false
+	};
+	g_mutex_init(&args.lock);
+	g_cond_init(&args.cond);
+
 	RedisState *rs = redis_state(global);
+
 	g_rw_lock_reader_lock(&rs->redis_lock);
 	redisAsyncContext *ctx = rs->redis;
 	g_rw_lock_reader_unlock(&rs->redis_lock);
+
+	g_dataset_set_data(ctx, "redis-disconnect-args", &args);
+
 	g_rec_mutex_lock(&hiredis_lock);
 	redisAsyncDisconnect(ctx);
 	g_rec_mutex_unlock(&hiredis_lock);
+
+	g_mutex_lock(&args.lock);
+	while( !args.disconnected )
+		g_cond_wait(&args.cond, &args.lock);
+	g_mutex_unlock(&args.lock);
+
+	g_mutex_clear(&args.lock);
+	g_cond_clear(&args.cond);
 }
 
 void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *cmd, ... ) {
@@ -272,6 +277,55 @@ void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *c
 	va_end(ap);
 	va_end(ap2);
 	return;
+}
+
+void vmod_connect( struct sess *sp, struct vmod_priv *global, const char *host, int port ) {
+	(void) sp;
+
+	g_return_if_fail(host != NULL);
+
+	dbgprintf("vmod_connect: host = '%s', port = %d\n", host, port);
+
+	RedisState *rs = redis_state(global);
+
+	// This check serves as an attempt to avoid taking a write lock unless we
+	// really have to.
+	{
+		g_rw_lock_reader_lock(&rs->redis_lock);
+		if( rs->redis != NULL ) {
+			// We're already connected. Release our lock and return.
+			g_rw_lock_reader_unlock(&rs->redis_lock);
+			return;
+		}
+		g_rw_lock_reader_unlock(&rs->redis_lock);
+	}
+
+	g_rw_lock_writer_lock(&rs->redis_lock);
+
+	// Sadly though, since glib doesn't support atomic lock promotion of it's RW
+	// lock, we have to do the check again.
+	if( rs->redis != NULL ) {
+		// We're already connected. Release our lock and return.
+		g_rw_lock_writer_unlock(&rs->redis_lock);
+		return;
+	}
+
+	g_rec_mutex_lock(&hiredis_lock);
+	rs->redis = redisAsyncConnect(host, port);
+	redisAsyncSetConnectCallback(rs->redis, redis_connect_callback);
+	redisAsyncSetDisconnectCallback(rs->redis, redis_disconnect_callback);
+	g_rec_mutex_unlock(&hiredis_lock);
+
+	g_rw_lock_writer_unlock(&rs->redis_lock);
+
+	g_dataset_set_data(rs->redis, "redis-state", rs);
+
+	g_rec_mutex_lock(&hiredis_lock);
+	redisGlibAttach(rs->io_context, rs->redis);
+	g_rec_mutex_unlock(&hiredis_lock);
+
+	// This should serve to block us until the connection is complete.
+	vmod_command_void(sp, global, "PING", vrt_magic_string_end);
 }
 
 static void vmod_command_int_callback( redisAsyncContext *rac, redisReply *reply, int *out ) {
