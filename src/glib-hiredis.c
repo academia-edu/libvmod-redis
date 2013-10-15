@@ -1,4 +1,4 @@
-// Taken from https://github.com/redis/hiredis/pull/71
+// Taken (and adapted) from https://github.com/redis/hiredis/pull/71
 
 #include <glib.h>
 
