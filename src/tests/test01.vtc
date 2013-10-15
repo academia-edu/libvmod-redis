@@ -1,4 +1,4 @@
-varnishtest "Test redis insertion and retrieval"
+varnishtest "Test command_string"
 
 server s1 {
 	rxreq
@@ -15,6 +15,10 @@ varnish v1 -vcl+backend {
 	sub vcl_deliver {
 		redis.command_void("SET foo %s" + req.http.payload);
 		set resp.http.redis = redis.command_string("GET foo");
+	}
+
+	sub vcl_fini {
+		redis.disconnect();
 	}
 } -start
 

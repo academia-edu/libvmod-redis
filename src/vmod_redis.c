@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
+#include <syslog.h>
 
 #include <glib.h>
 #include <hiredis/hiredis.h>
@@ -18,19 +19,23 @@
 #include <stdio.h>
 #endif
 
-//#define dbgprintf(...) fprintf(stderr, __VA_ARGS__)
+//#define dbgprintf(...) syslog(LOG_DEBUG, __VA_ARGS__)
 #define dbgprintf(...)
+
+#ifndef LOG_PERROR
+#define LOG_PERROR 0
+#endif
 
 static GRecMutex hiredis_lock;
 
 typedef struct {
+	uint64_t magic;
+#define REDIS_MAGIC 0x0be7c29131fbd7a4ULL
 	redisAsyncContext *redis;
-	GRWLock redis_lock;
+	gint errored;
 	GThread *io_thread;
 	GMainContext *io_context;
 	GMainLoop *io_loop;
-	uint64_t magic;
-#define REDIS_MAGIC 0x0be7c29131fbd7a4ULL
 } RedisState;
 
 typedef struct {
@@ -49,7 +54,6 @@ static void free_redis_state( RedisState *rs ) {
 	g_thread_unref(rs->io_thread);
 	g_main_loop_unref(rs->io_loop);
 	g_main_context_unref(rs->io_context);
-	g_rw_lock_clear(&rs->redis_lock);
 	g_slice_free(RedisState, rs);
 }
 
@@ -64,7 +68,7 @@ static void io_thread_main( RedisIoThreadState *ts ) {
 static void init_redis_state( RedisState *rs ) {
 	rs->magic = REDIS_MAGIC;
 	rs->redis = NULL;
-	g_rw_lock_init(&rs->redis_lock);
+	rs->errored = false;
 	rs->io_context = g_main_context_new();
 	rs->io_loop = g_main_loop_new(rs->io_context, false);
 
@@ -90,8 +94,8 @@ typedef struct {
 typedef struct {
 	RedisState *rs;
 	struct {
-		GMutex *lock;
-		GCond *cond;
+		GMutex lock;
+		GCond cond;
 		bool value;
 	} done;
 	RedisResponseClosure *closure;
@@ -101,24 +105,27 @@ void redis_response_callback( redisAsyncContext *c, redisReply *reply, RedisResp
 	(void) c;
 
 	if( reply->type == REDIS_REPLY_ERROR ) {
-		dbgprintf("redis_response_callback: error '%s'\n", reply->str);
-		g_rw_lock_writer_lock(&rrs->rs->redis_lock);
-		rrs->rs->redis = NULL;
-		g_rw_lock_writer_unlock(&rrs->rs->redis_lock);
+		syslog(LOG_ERR, "redis_response_callback: error '%s'\n", reply->str);
+		g_atomic_int_set(&rrs->rs->errored, 1);
 	} else if( rrs->closure != NULL ) {
 		g_assert(rrs->closure->func != NULL);
 		rrs->closure->func(c, reply, rrs->closure->data);
 	}
 
-	g_mutex_lock(rrs->done.lock);
+	g_mutex_lock(&rrs->done.lock);
 	rrs->done.value = true;
-	g_cond_broadcast(rrs->done.cond);
-	g_mutex_unlock(rrs->done.lock);
+	g_cond_broadcast(&rrs->done.cond);
+	g_mutex_unlock(&rrs->done.lock);
 }
 
 void redis_connect_callback( const redisAsyncContext *c ) {
 	(void) c;
-	dbgprintf("redis_connect_callback: Connected!\n");
+
+	if( c->err == REDIS_ERR ) {
+		syslog(LOG_ERR, "redis_disconnect_callack: error '%s'\n", c->errstr);
+	} else {
+		dbgprintf("redis_connect_callback: Connected!\n");
+	}
 }
 
 typedef struct {
@@ -130,19 +137,20 @@ typedef struct {
 void redis_disconnect_callback( const redisAsyncContext *c, int status ) {
 	(void) status;
 
-	dbgprintf("redis_disconnect_callback: Disconnected!\n");
+	if( status == REDIS_ERR || c->err == REDIS_ERR ) {
+		syslog(LOG_ERR, "redis_disconnect_callack: error '%s'\n", c->errstr);
+	} else {
+		dbgprintf("redis_disconnect_callback: Disconnected\n");
+	}
 
 	RedisState *rs = g_dataset_get_data(c, "redis-state");
-	g_assert(rs != NULL);
 	g_dataset_remove_data(c, "redis-state");
 
 	g_rec_mutex_lock(&hiredis_lock);
 	redisGlibDetach(rs->redis);
 	g_rec_mutex_unlock(&hiredis_lock);
 
-	g_rw_lock_writer_lock(&rs->redis_lock);
 	rs->redis = NULL;
-	g_rw_lock_writer_unlock(&rs->redis_lock);
 
 	RedisDisconnectArgs *args = g_dataset_get_data(c, "redis-disconnect-args");
 	g_assert(args != NULL);
@@ -157,44 +165,35 @@ void redis_disconnect_callback( const redisAsyncContext *c, int status ) {
 void redis_command( RedisState *rs, RedisResponseClosure *closure, const char *cmd, va_list ap ) {
 	if( cmd == NULL ) return;
 
-	g_rw_lock_reader_lock(&rs->redis_lock);
-	redisAsyncContext *ctx = rs->redis;
-	g_rw_lock_reader_unlock(&rs->redis_lock);
-
-	if( ctx == NULL ) return;
-
-	GMutex done_lock;
-	g_mutex_init(&done_lock);
-
-	GCond done_cond;
-	g_cond_init(&done_cond);
+	if( rs->redis == NULL ) return;
 
 	RedisResponseState rrs = {
 		.rs = rs,
 		.done = {
-			.lock = &done_lock,
-			.cond = &done_cond,
 			.value = false
 		},
 		.closure = closure
 	};
 
-	g_mutex_lock(&done_lock);
+	g_mutex_init(&rrs.done.lock);
+	g_cond_init(&rrs.done.cond);
+
+	g_mutex_lock(&rrs.done.lock);
 
 	while( !rrs.done.value ) {
 		g_rec_mutex_lock(&hiredis_lock);
-		redisvAsyncCommand(ctx, (redisCallbackFn *) redis_response_callback, &rrs, cmd, ap);
+		redisvAsyncCommand(rs->redis, (redisCallbackFn *) redis_response_callback, &rrs, cmd, ap);
 		g_rec_mutex_unlock(&hiredis_lock);
 
 		dbgprintf("redis_command: waiting...\n");
-		g_cond_wait(&done_cond, &done_lock);
+		g_cond_wait(&rrs.done.cond, &rrs.done.lock);
 		dbgprintf("redis_command: done\n");
 	}
 
-	g_mutex_unlock(&done_lock);
+	g_mutex_unlock(&rrs.done.lock);
 
-	g_cond_clear(&done_cond);
-	g_mutex_clear(&done_lock);
+	g_cond_clear(&rrs.done.cond);
+	g_mutex_clear(&rrs.done.lock);
 }
 
 // -- util functions
@@ -206,7 +205,7 @@ static bool contains_null_strings( const char *cmd, va_list ap ) {
 	do {
 		s = va_arg(ap, const char *);
 		if( s == NULL ) {
-			dbgprintf("contains_null_strings: Found NULL string arguments\n");
+			syslog(LOG_WARNING, "contains_null_strings: Found NULL string arguments\n");
 			return true;
 		}
 	} while( s != vrt_magic_string_end );
@@ -216,11 +215,21 @@ static bool contains_null_strings( const char *cmd, va_list ap ) {
 
 // -- vmod functions
 
+static void vmod_redis_free( RedisState *rs ) {
+	free_redis_state(rs);
+	closelog();
+}
+
 int vmod_redis_init( struct vmod_priv *global, const struct VCL_conf *conf ) {
 	(void) conf;
 	dbgprintf("vmod_redis_init\n");
+#ifndef NDEBUG
+	openlog("libvmod-redis", LOG_PERROR, LOG_USER | LOG_INFO);
+#else
+	openlog("libvmod-redis", 0, LOG_USER | LOG_INFO);
+#endif
 	global->priv = new_redis_state();
-	global->free = (vmod_priv_free_f *) free_redis_state;
+	global->free = (vmod_priv_free_f *) vmod_redis_free;
 	return 0;
 }
 
@@ -243,14 +252,10 @@ void vmod_disconnect( struct sess *sp, struct vmod_priv *global ) {
 
 	RedisState *rs = redis_state(global);
 
-	g_rw_lock_reader_lock(&rs->redis_lock);
-	redisAsyncContext *ctx = rs->redis;
-	g_rw_lock_reader_unlock(&rs->redis_lock);
-
-	g_dataset_set_data(ctx, "redis-disconnect-args", &args);
+	g_dataset_set_data(rs->redis, "redis-disconnect-args", &args);
 
 	g_rec_mutex_lock(&hiredis_lock);
-	redisAsyncDisconnect(ctx);
+	redisAsyncDisconnect(rs->redis);
 	g_rec_mutex_unlock(&hiredis_lock);
 
 	g_mutex_lock(&args.lock);
@@ -267,12 +272,19 @@ void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *c
 	g_return_if_fail(cmd != NULL);
 	dbgprintf("vmod_command_void: cmd = '%s'\n", cmd);
 
+	RedisState *rs = redis_state(global);
+
+	if( g_atomic_int_get(&rs->errored) ) {
+		syslog(LOG_ERR, "vmod_command_void: Skipping due to recorded error condition\n");
+		return;
+	}
+
 	va_list ap, ap2;
 	va_start(ap, cmd);
 	va_copy(ap2, ap);
 
 	if( !contains_null_strings(cmd, ap) )
-		redis_command(redis_state(global), NULL, cmd, ap2);
+		redis_command(rs, NULL, cmd, ap2);
 
 	va_end(ap);
 	va_end(ap2);
@@ -288,35 +300,13 @@ void vmod_connect( struct sess *sp, struct vmod_priv *global, const char *host, 
 
 	RedisState *rs = redis_state(global);
 
-	// This check serves as an attempt to avoid taking a write lock unless we
-	// really have to.
-	{
-		g_rw_lock_reader_lock(&rs->redis_lock);
-		if( rs->redis != NULL ) {
-			// We're already connected. Release our lock and return.
-			g_rw_lock_reader_unlock(&rs->redis_lock);
-			return;
-		}
-		g_rw_lock_reader_unlock(&rs->redis_lock);
-	}
-
-	g_rw_lock_writer_lock(&rs->redis_lock);
-
-	// Sadly though, since glib doesn't support atomic lock promotion of it's RW
-	// lock, we have to do the check again.
-	if( rs->redis != NULL ) {
-		// We're already connected. Release our lock and return.
-		g_rw_lock_writer_unlock(&rs->redis_lock);
-		return;
-	}
+	g_assert(rs->redis == NULL && "vmod_connect called multiple times!");
 
 	g_rec_mutex_lock(&hiredis_lock);
 	rs->redis = redisAsyncConnect(host, port);
 	redisAsyncSetConnectCallback(rs->redis, (redisConnectCallback *) redis_connect_callback);
 	redisAsyncSetDisconnectCallback(rs->redis, redis_disconnect_callback);
 	g_rec_mutex_unlock(&hiredis_lock);
-
-	g_rw_lock_writer_unlock(&rs->redis_lock);
 
 	g_dataset_set_data(rs->redis, "redis-state", rs);
 
@@ -337,7 +327,14 @@ int vmod_command_int( struct sess *sp, struct vmod_priv *global, const char *cmd
 	(void) sp;
 	g_return_val_if_fail(cmd != NULL, -1);
 	dbgprintf("vmod_command_int: cmd = '%s'\n", cmd);
+
 	RedisState *rs = redis_state(global);
+
+	if( g_atomic_int_get(&rs->errored) ) {
+		syslog(LOG_ERR, "vmod_command_int: Skipping due to recorded error condition\n");
+		return -1;
+	}
+
 	int val = -1;
 	RedisResponseClosure rrc = {
 		.func = (__typeof__(rrc.func)) vmod_command_int_callback,
@@ -377,7 +374,14 @@ const char * vmod_command_string(struct sess *sp, struct vmod_priv *global, cons
 	(void) sp;
 	g_return_val_if_fail(cmd != NULL, "");
 	dbgprintf("vmod_command_string: cmd = '%s'\n", cmd);
+
 	RedisState *rs = redis_state(global);
+
+	if( g_atomic_int_get(&rs->errored) ) {
+		syslog(LOG_ERR, "vmod_command_string: Skipping due to recorded error condition\n");
+		return NULL;
+	}
+
 	VmodCommandStringCallbackArgs args = {
 		.sp = sp,
 		.ret = NULL
