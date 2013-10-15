@@ -116,8 +116,8 @@ void redis_response_callback( redisAsyncContext *c, redisReply *reply, RedisResp
 	g_mutex_unlock(rrs->done.lock);
 }
 
-void redis_connect_callback( const redisAsyncContext *c, int status ) {
-	(void) c, (void) status;
+void redis_connect_callback( const redisAsyncContext *c ) {
+	(void) c;
 	dbgprintf("redis_connect_callback: Connected!\n");
 }
 
@@ -312,7 +312,7 @@ void vmod_connect( struct sess *sp, struct vmod_priv *global, const char *host, 
 
 	g_rec_mutex_lock(&hiredis_lock);
 	rs->redis = redisAsyncConnect(host, port);
-	redisAsyncSetConnectCallback(rs->redis, redis_connect_callback);
+	redisAsyncSetConnectCallback(rs->redis, (redisConnectCallback *) redis_connect_callback);
 	redisAsyncSetDisconnectCallback(rs->redis, redis_disconnect_callback);
 	g_rec_mutex_unlock(&hiredis_lock);
 
