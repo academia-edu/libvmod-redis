@@ -182,6 +182,23 @@ void redis_command( RedisState *rs, RedisResponseClosure *closure, const char *c
 	g_mutex_clear(&done_lock);
 }
 
+// -- util functions
+
+static bool contains_null_strings( const char *cmd, va_list ap ) {
+	if( cmd == NULL ) return true;
+
+	const char *s = NULL;
+	do {
+		s = va_arg(ap, const char *);
+		if( s == NULL ) {
+			dbgprintf("contains_null_strings: Found NULL string arguments\n");
+			return true;
+		}
+	} while( s != vrt_magic_string_end );
+
+	return false;
+}
+
 // -- vmod functions
 
 int vmod_redis_init( struct vmod_priv *global, const struct VCL_conf *conf ) {
@@ -200,6 +217,8 @@ static RedisState *redis_state( struct vmod_priv *global ) {
 
 void vmod_connect( struct sess *sp, struct vmod_priv *global, const char *host, int port ) {
 	(void) sp;
+
+	g_return_if_fail(host != NULL);
 
 	dbgprintf("vmod_connect: host = '%s', port = %d\n", host, port);
 
@@ -240,12 +259,19 @@ void vmod_disconnect( struct sess *sp, struct vmod_priv *global ) {
 
 void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *cmd, ... ) {
 	(void) sp;
+	g_return_if_fail(cmd != NULL);
 	dbgprintf("vmod_command_void: cmd = '%s'\n", cmd);
-	RedisState *rs = redis_state(global);
-	va_list ap;
+
+	va_list ap, ap2;
 	va_start(ap, cmd);
-	redis_command(rs, NULL, cmd, ap);
+	va_copy(ap2, ap);
+
+	if( !contains_null_strings(cmd, ap) )
+		redis_command(redis_state(global), NULL, cmd, ap2);
+
 	va_end(ap);
+	va_end(ap2);
+	return;
 }
 
 static void vmod_command_int_callback( redisAsyncContext *rac, redisReply *reply, int *out ) {
@@ -255,6 +281,7 @@ static void vmod_command_int_callback( redisAsyncContext *rac, redisReply *reply
 
 int vmod_command_int( struct sess *sp, struct vmod_priv *global, const char *cmd, ... ) {
 	(void) sp;
+	g_return_val_if_fail(cmd != NULL, -1);
 	dbgprintf("vmod_command_int: cmd = '%s'\n", cmd);
 	RedisState *rs = redis_state(global);
 	int val = -1;
@@ -262,10 +289,16 @@ int vmod_command_int( struct sess *sp, struct vmod_priv *global, const char *cmd
 		.func = (__typeof__(rrc.func)) vmod_command_int_callback,
 		.data = &val
 	};
-	va_list ap;
+
+	va_list ap, ap2;
 	va_start(ap, cmd);
-	redis_command(rs, &rrc, cmd, ap);
+	va_copy(ap2, ap);
+
+	if( !contains_null_strings(cmd, ap) )
+		redis_command(rs, &rrc, cmd, ap2);
+
 	va_end(ap);
+	va_end(ap2);
 	return val;
 }
 
@@ -288,6 +321,7 @@ static void vmod_command_string_callback( redisAsyncContext *rac, redisReply *re
 
 const char * vmod_command_string(struct sess *sp, struct vmod_priv *global, const char *cmd, ...) {
 	(void) sp;
+	g_return_val_if_fail(cmd != NULL, "");
 	dbgprintf("vmod_command_string: cmd = '%s'\n", cmd);
 	RedisState *rs = redis_state(global);
 	VmodCommandStringCallbackArgs args = {
@@ -298,10 +332,17 @@ const char * vmod_command_string(struct sess *sp, struct vmod_priv *global, cons
 		.func = (__typeof__(rrc.func)) vmod_command_string_callback,
 		.data = &args
 	};
-	va_list ap;
+
+	va_list ap, ap2;
 	va_start(ap, cmd);
-	redis_command(rs, &rrc, cmd, ap);
+	va_copy(ap2, ap);
+
+	if( !contains_null_strings(cmd, ap) )
+		redis_command(rs, &rrc, cmd, ap2);
+
 	va_end(ap);
+	va_end(ap2);
+
 	dbgprintf("vmod_command_string: args.ret = '%s'\n", args.ret);
 	return args.ret;
 }
