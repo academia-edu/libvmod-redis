@@ -26,7 +26,7 @@
 #define LOG_PERROR 0
 #endif
 
-static GRecMutex hiredis_lock;
+GRecMutex hiredis_lock;
 
 typedef struct {
 	uint64_t magic;
@@ -180,11 +180,11 @@ void redis_command( RedisState *rs, RedisResponseClosure *closure, const char *c
 
 	g_mutex_lock(&rrs.done.lock);
 
-	while( !rrs.done.value ) {
-		g_rec_mutex_lock(&hiredis_lock);
-		redisvAsyncCommand(rs->redis, (redisCallbackFn *) redis_response_callback, &rrs, cmd, ap);
-		g_rec_mutex_unlock(&hiredis_lock);
+	g_rec_mutex_lock(&hiredis_lock);
+	redisvAsyncCommand(rs->redis, (redisCallbackFn *) redis_response_callback, &rrs, cmd, ap);
+	g_rec_mutex_unlock(&hiredis_lock);
 
+	while( !rrs.done.value ) {
 		dbgprintf("redis_command: waiting...\n");
 		g_cond_wait(&rrs.done.cond, &rrs.done.lock);
 		dbgprintf("redis_command: done\n");

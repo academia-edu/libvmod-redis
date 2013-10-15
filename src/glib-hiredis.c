@@ -5,6 +5,8 @@
 #include <hiredis/hiredis.h>
 #include <hiredis/async.h>
 
+extern GRecMutex hiredis_lock;
+
 typedef struct redisGlibEvents {
 	GSource source;
 	GPollFD poll_fd;
@@ -48,11 +50,17 @@ static gboolean redisGlibSourceDispatch(GSource *source,
 		ret = FALSE;
 	}
 
-	if(!ret || (revents & G_IO_IN))
+	if(!ret || (revents & G_IO_IN)) {
+		g_rec_mutex_lock(&hiredis_lock);
 		redisAsyncHandleRead(e->context);
+		g_rec_mutex_unlock(&hiredis_lock);
+	}
 
-	if(!ret || (revents & G_IO_OUT))
+	if(!ret || (revents & G_IO_OUT)) {
+		g_rec_mutex_lock(&hiredis_lock);
 		redisAsyncHandleWrite(e->context);
+		g_rec_mutex_unlock(&hiredis_lock);
+	}
 
 	return ret;
 }
