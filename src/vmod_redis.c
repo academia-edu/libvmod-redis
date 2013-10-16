@@ -1,8 +1,9 @@
+#include <config.h>
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
-#include <syslog.h>
 
 #include <glib.h>
 #include <hiredis/hiredis.h>
@@ -16,14 +17,9 @@
 #include "vcc_if.h"
 
 #ifndef NDEBUG
-#include <stdio.h>
-#endif
-
-//#define dbgprintf(...) syslog(LOG_DEBUG, __VA_ARGS__)
-#define dbgprintf(...)
-
-#ifndef LOG_PERROR
-#define LOG_PERROR 0
+#define dbgprintf(sp, ...) VSL(SLT_VCL_trace, ((sp) == NULL ? 0 : ((struct sess *) sp)->id), __VA_ARGS__)
+#else
+#define dbgprintf(...) ((void) 0)
 #endif
 
 GRecMutex hiredis_lock;
@@ -58,11 +54,11 @@ static void free_redis_state( RedisState *rs ) {
 }
 
 static void io_thread_main( RedisIoThreadState *ts ) {
-	dbgprintf("io_thread_main: begin\n");
+	dbgprintf(0, "io_thread_main: begin");
 	g_main_context_push_thread_default(ts->io_context);
 	g_main_loop_run(ts->io_loop);
 	g_slice_free(RedisIoThreadState, ts);
-	dbgprintf("io_thread_main: end\n");
+	dbgprintf(0, "io_thread_main: end");
 }
 
 static void init_redis_state( RedisState *rs ) {
@@ -105,7 +101,7 @@ void redis_response_callback( redisAsyncContext *c, redisReply *reply, RedisResp
 	(void) c;
 
 	if( reply->type == REDIS_REPLY_ERROR ) {
-		syslog(LOG_ERR, "redis_response_callback: error '%s'\n", reply->str);
+		VSL(SLT_VCL_error, 0, "redis_response_callback: error '%s'", reply->str);
 		g_atomic_int_set(&rrs->rs->errored, 1);
 	} else if( rrs->closure != NULL ) {
 		g_assert(rrs->closure->func != NULL);
@@ -122,9 +118,9 @@ void redis_connect_callback( const redisAsyncContext *c ) {
 	(void) c;
 
 	if( c->err == REDIS_ERR ) {
-		syslog(LOG_ERR, "redis_disconnect_callack: error '%s'\n", c->errstr);
+		VSL(SLT_VCL_error, 0, "redis_disconnect_callack: error '%s'", c->errstr);
 	} else {
-		dbgprintf("redis_connect_callback: Connected!\n");
+		dbgprintf(0, "redis_connect_callback: Connected!");
 	}
 }
 
@@ -138,9 +134,9 @@ void redis_disconnect_callback( const redisAsyncContext *c, int status ) {
 	(void) status;
 
 	if( status == REDIS_ERR || c->err == REDIS_ERR ) {
-		syslog(LOG_ERR, "redis_disconnect_callack: error '%s'\n", c->errstr);
+		VSL(SLT_VCL_error, 0, "redis_disconnect_callack: error '%s'", c->errstr);
 	} else {
-		dbgprintf("redis_disconnect_callback: Disconnected\n");
+		dbgprintf(0, "redis_disconnect_callback: Disconnected");
 	}
 
 	RedisState *rs = g_dataset_get_data(c, "redis-state");
@@ -185,9 +181,9 @@ void redis_command( RedisState *rs, RedisResponseClosure *closure, const char *c
 	g_rec_mutex_unlock(&hiredis_lock);
 
 	while( !rrs.done.value ) {
-		dbgprintf("redis_command: waiting...\n");
+		dbgprintf(0, "redis_command: waiting...");
 		g_cond_wait(&rrs.done.cond, &rrs.done.lock);
-		dbgprintf("redis_command: done\n");
+		dbgprintf(0, "redis_command: done");
 	}
 
 	g_mutex_unlock(&rrs.done.lock);
@@ -205,7 +201,7 @@ static bool contains_null_strings( const char *cmd, va_list ap ) {
 	do {
 		s = va_arg(ap, const char *);
 		if( s == NULL ) {
-			syslog(LOG_WARNING, "contains_null_strings: Found NULL string arguments\n");
+			VSL(SLT_VCL_error, 0, "contains_null_strings: Found NULL string arguments");
 			return true;
 		}
 	} while( s != vrt_magic_string_end );
@@ -217,17 +213,12 @@ static bool contains_null_strings( const char *cmd, va_list ap ) {
 
 static void vmod_redis_free( RedisState *rs ) {
 	free_redis_state(rs);
-	closelog();
 }
 
 int vmod_redis_init( struct vmod_priv *global, const struct VCL_conf *conf ) {
 	(void) conf;
-	dbgprintf("vmod_redis_init\n");
-#ifndef NDEBUG
-	openlog("libvmod-redis", LOG_PERROR, LOG_USER | LOG_INFO);
-#else
-	openlog("libvmod-redis", 0, LOG_USER | LOG_INFO);
-#endif
+	dbgprintf(0, "vmod_redis_init");
+
 	global->priv = new_redis_state();
 	global->free = (vmod_priv_free_f *) vmod_redis_free;
 	return 0;
@@ -241,8 +232,7 @@ static RedisState *redis_state( struct vmod_priv *global ) {
 }
 
 void vmod_disconnect( struct sess *sp, struct vmod_priv *global ) {
-	(void) sp;
-	dbgprintf("vmod_disconnect\n");
+	dbgprintf(sp, "vmod_disconnect");
 
 	RedisDisconnectArgs args = {
 		.disconnected = false
@@ -268,14 +258,13 @@ void vmod_disconnect( struct sess *sp, struct vmod_priv *global ) {
 }
 
 void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *cmd, ... ) {
-	(void) sp;
 	g_return_if_fail(cmd != NULL);
-	dbgprintf("vmod_command_void: cmd = '%s'\n", cmd);
+	dbgprintf(sp, "vmod_command_void: cmd = '%s'", cmd);
 
 	RedisState *rs = redis_state(global);
 
 	if( g_atomic_int_get(&rs->errored) ) {
-		syslog(LOG_ERR, "vmod_command_void: Skipping due to recorded error condition\n");
+		VSL(SLT_VCL_error, sp->id, "vmod_command_void: Skipping due to recorded error condition");
 		return;
 	}
 
@@ -292,11 +281,9 @@ void vmod_command_void( struct sess *sp, struct vmod_priv *global, const char *c
 }
 
 void vmod_connect( struct sess *sp, struct vmod_priv *global, const char *host, int port ) {
-	(void) sp;
-
 	g_return_if_fail(host != NULL);
 
-	dbgprintf("vmod_connect: host = '%s', port = %d\n", host, port);
+	dbgprintf(sp, "vmod_connect: host = '%s', port = %d", host, port);
 
 	RedisState *rs = redis_state(global);
 
@@ -324,14 +311,13 @@ static void vmod_command_int_callback( redisAsyncContext *rac, redisReply *reply
 }
 
 int vmod_command_int( struct sess *sp, struct vmod_priv *global, const char *cmd, ... ) {
-	(void) sp;
 	g_return_val_if_fail(cmd != NULL, -1);
-	dbgprintf("vmod_command_int: cmd = '%s'\n", cmd);
+	dbgprintf(sp, "vmod_command_int: cmd = '%s'", cmd);
 
 	RedisState *rs = redis_state(global);
 
 	if( g_atomic_int_get(&rs->errored) ) {
-		syslog(LOG_ERR, "vmod_command_int: Skipping due to recorded error condition\n");
+		VSL(SLT_VCL_error, sp->id, "vmod_command_int: Skipping due to recorded error condition");
 		return -1;
 	}
 
@@ -361,9 +347,9 @@ typedef struct {
 static void vmod_command_string_callback( redisAsyncContext *rac, redisReply *reply, VmodCommandStringCallbackArgs *args ) {
 	(void) rac;
 #ifndef NDEBUG
-	dbgprintf("vmod_command_string_callback: reply = %p\n", (void *) reply);
+	dbgprintf(0, "vmod_command_string_callback: reply = %p", (void *) reply);
 	if( reply != NULL ) {
-		dbgprintf("vmod_command_string_callback: reply->type = %d, REDIS_REPLY_STRING = %d\n", reply->type, REDIS_REPLY_STRING);
+		dbgprintf(0, "vmod_command_string_callback: reply->type = %d, REDIS_REPLY_STRING = %d", reply->type, REDIS_REPLY_STRING);
 	}
 #endif
 	if( reply != NULL && reply->type == REDIS_REPLY_STRING )
@@ -371,14 +357,13 @@ static void vmod_command_string_callback( redisAsyncContext *rac, redisReply *re
 }
 
 const char * vmod_command_string(struct sess *sp, struct vmod_priv *global, const char *cmd, ...) {
-	(void) sp;
 	g_return_val_if_fail(cmd != NULL, "");
-	dbgprintf("vmod_command_string: cmd = '%s'\n", cmd);
+	dbgprintf(0, "vmod_command_string: cmd = '%s'", cmd);
 
 	RedisState *rs = redis_state(global);
 
 	if( g_atomic_int_get(&rs->errored) ) {
-		syslog(LOG_ERR, "vmod_command_string: Skipping due to recorded error condition\n");
+		VSL(SLT_VCL_error, sp->id, "vmod_command_string: Skipping due to recorded error condition");
 		return NULL;
 	}
 
@@ -401,6 +386,6 @@ const char * vmod_command_string(struct sess *sp, struct vmod_priv *global, cons
 	va_end(ap);
 	va_end(ap2);
 
-	dbgprintf("vmod_command_string: args.ret = '%s'\n", args.ret);
+	dbgprintf(0, "vmod_command_string: args.ret = '%s'", args.ret);
 	return args.ret;
 }
