@@ -17,7 +17,7 @@
 #include "vcc_if.h"
 
 #ifndef NDEBUG
-#define dbgprintf(sp, ...) VSL(SLT_VCL_trace, ((sp) == NULL ? 0 : ((struct sess *) sp)->id), __VA_ARGS__)
+#define dbgprintf(sp, ...) VSL(SLT_VCL_trace, ((sp) == NULL ? 0 : ((struct sess *) (sp))->id), __VA_ARGS__)
 #else
 #define dbgprintf(...) ((void) 0)
 #endif
