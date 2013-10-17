@@ -10,7 +10,6 @@ extern GRecMutex hiredis_lock;
 typedef struct redisGlibEvents {
 	GSource source;
 	GPollFD poll_fd;
-	gboolean removed;
 
 	redisAsyncContext *context;
 } redisGlibEvents;
@@ -60,6 +59,11 @@ static gboolean redisGlibSourceDispatch(GSource *source,
 		g_rec_mutex_lock(&hiredis_lock);
 		redisAsyncHandleWrite(e->context);
 		g_rec_mutex_unlock(&hiredis_lock);
+	}
+
+	if( e->context->c.err != REDIS_OK ) {
+		g_source_remove_poll(source, &e->poll_fd);
+		ret = FALSE;
 	}
 
 	return ret;

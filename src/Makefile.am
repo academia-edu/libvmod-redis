@@ -10,7 +10,8 @@ libvmod_redis_la_SOURCES = \
 	vcc_if.c \
 	vcc_if.h \
 	vmod_redis.c \
-	glib-hiredis.c
+	glib-hiredis.c \
+	latch.c
 
 vcc_if.c vcc_if.h: $(VARNISHSRC)/lib/libvmod_std/vmod.py $(top_srcdir)/src/vmod_redis.vcc
 	@PYTHON@ $(VARNISHSRC)/lib/libvmod_std/vmod.py $(top_srcdir)/src/vmod_redis.vcc

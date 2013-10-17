@@ -7,6 +7,5 @@
 #include <hiredis/async.h>
 
 int redisGlibAttach(GMainContext *, redisAsyncContext *);
-int redisGlibDetach(redisAsyncContext *);
 
 #endif

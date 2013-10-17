@@ -17,6 +17,11 @@ For now, refer to [vmod_redis.vcc][vmod_redis_vcc]
 Note that this library has no error handling facilities. All errors are silently
 ignored.
 
+# Notes
+
+`vmod_disconnect` and `vmod_connect` are NOT thread safe. Do not call them
+anywhere except `vcl_init` and `vcl_fini`.
+
 [varnish]: https://www.varnish-cache.org/
 [vcl]: https://www.varnish-cache.org/docs/3.0/reference/vcl.html
 [redis]: http://redis.io/
