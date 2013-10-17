@@ -232,6 +232,7 @@ static RedisState *redis_state( struct vmod_priv *global ) {
 }
 
 void vmod_disconnect( struct sess *sp, struct vmod_priv *global ) {
+	(void) sp;
 	dbgprintf(sp, "vmod_disconnect");
 
 	RedisDisconnectArgs args = {
